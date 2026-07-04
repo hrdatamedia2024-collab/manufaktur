@@ -282,6 +282,10 @@ function loadPage(page, btn){
 
     document.getElementById("mainFrame").src=page;
 
+    document.querySelector(".header").style.display="none";
+
+    document.querySelector(".kpi").style.display="none";
+
     setActive(btn);
 }
 
@@ -290,6 +294,10 @@ function showHome(btn){
     document.getElementById("mainFrame").style.display="none";
 
     document.getElementById("homePage").style.display="block";
+
+    document.querySelector(".header").style.display="flex";
+
+    document.querySelector(".kpi").style.display="grid";
 
     setActive(btn);
 }
