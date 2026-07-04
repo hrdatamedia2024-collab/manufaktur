@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Dashboard Sistem Produksi</title>
+
+<style>
+
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+}
+
+body{
+    font-family:'Segoe UI',sans-serif;
+    background:#f5f7fb;
+    height:100vh;
+    display:flex;
+}
+
+/* SIDEBAR */
+
+.sidebar{
+    width:260px;
+    background:#1e293b;
+    color:white;
+    display:flex;
+    flex-direction:column;
+}
+
+.logo{
+    padding:20px;
+    font-size:22px;
+    font-weight:bold;
+    text-align:center;
+    border-bottom:1px solid rgba(255,255,255,.1);
+}
+
+.menu{
+    padding:15px;
+}
+
+.menu button{
+    width:100%;
+    padding:12px;
+    margin-bottom:10px;
+    border:none;
+    border-radius:8px;
+    background:#334155;
+    color:white;
+    text-align:left;
+    cursor:pointer;
+    transition:0.3s;
+}
+
+.menu button:hover{
+    background:#2563eb;
+}
+
+/* MAIN */
+
+.main{
+    flex:1;
+    display:flex;
+    flex-direction:column;
+}
+
+/* HEADER */
+
+.header{
+    height:50px;
+    background:white;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:0 25px;
+    box-shadow:0 2px 8px rgba(0,0,0,.05);
+}
+
+.header h2{
+    color:#1e293b;
+}
+
+/* KPI */
+
+.kpi{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:15px;
+    padding:20px;
+}
+
+.card{
+    background:white;
+    padding:20px;
+    border-radius:px;
+    box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
+
+.card-title{
+    color:#64748b;
+    font-size:14px;
+}
+
+.card-value{
+    margin-top:10px;
+    font-size:28px;
+    font-weight:bold;
+}
+
+.green{
+    color:#16a34a;
+}
+
+.red{
+    color:#dc2626;
+}
+
+.orange{
+    color:#ea580c;
+}
+
+.blue{
+    color:#2563eb;
+}
+
+/* CONTENT */
+
+.content{
+    flex:1;
+    padding:20px;
+}
+
+iframe{
+    width:100%;
+    height:100%;
+    border:none;
+    border-radius:12px;
+    background:white;
+    box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
+
+.welcome{
+    background:white;
+    border-radius:12px;
+    padding:40px;
+    text-align:center;
+    color:#64748b;
+    box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
+
+@media(max-width:1000px){
+
+.kpi{
+    grid-template-columns:repeat(2,1fr);
+}
+
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="sidebar">
+
+<div class="logo">
+🏭 ERP PRODUKSI
+</div>
+
+<div class="menu">
+
+<button onclick="showHome()">
+🏠 Dashboard
+</button>
+
+<button onclick="loadPage('produksi/produksi.html')">
+🏭 Produksi
+</button>
+
+<button onclick="loadPage('inventory/inventory.html')">
+📦 Inventory
+</button>
+
+<button onclick="loadPage('gokuah/gokuah.html')">
+🍜 Go Kuah
+</button>
+
+</div>
+
+</div>
+
+<div class="main">
+
+<div class="header">
+<h2>Sistem Produksi Terintegrasi</h2>
+<div id="tanggal"></div>
+</div>
+
+<div class="kpi">
+
+<div class="card">
+<div class="card-title">Achievement Produksi</div>
+<div class="card-value green">95%</div>
+</div>
+
+<div class="card">
+<div class="card-title">Waste</div>
+<div class="card-value orange">2.1%</div>
+</div>
+
+<div class="card">
+<div class="card-title">Reject</div>
+<div class="card-value red">1.3%</div>
+</div>
+
+<div class="card">
+<div class="card-title">Stock Aman</div>
+<div class="card-value blue">12 Hari</div>
+</div>
+
+</div>
+
+<div class="content">
+
+<div id="homePage" class="welcome">
+
+<h2>Selamat Datang</h2>
+
+<br>
+
+<p>
+Pilih menu Produksi, Inventory, atau Go Kuah dari sidebar.
+</p>
+
+</div>
+
+<iframe
+id="mainFrame"
+style="display:none;">
+</iframe>
+
+</div>
+
+</div>
+
+<script>
+
+document.getElementById("tanggal").innerHTML =
+new Date().toLocaleDateString("id-ID",{
+    weekday:'long',
+    day:'numeric',
+    month:'long',
+    year:'numeric'
+});
+
+function loadPage(page){
+
+    document.getElementById("homePage").style.display="none";
+
+    document.getElementById("mainFrame").style.display="block";
+
+    document.getElementById("mainFrame").src=page;
+}
+
+function showHome(){
+
+    document.getElementById("mainFrame").style.display="none";
+
+    document.getElementById("homePage").style.display="block";
+}
+
+</script>
+
+</body>
+</html>
