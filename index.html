@@ -14,15 +14,6 @@
     box-sizing:border-box;
 }
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="assets/js/config/supabase.js"></script>
-<script>
-console.log("Supabase:", supabase);
-</script>
-git add .
-git commit -m "Connect Supabase"
-git push
-
 body{
     font-family:'Segoe UI',sans-serif;
     background:#f5f7fb;
@@ -69,6 +60,10 @@ body{
     background:#2563eb;
 }
 
+.menu button.active{
+    background:#2563eb;
+}
+
 /* MAIN */
 
 .main{
@@ -105,7 +100,7 @@ body{
 .card{
     background:white;
     padding:20px;
-    border-radius:px;
+    border-radius:12px;
     box-shadow:0 2px 8px rgba(0,0,0,.08);
 }
 
@@ -182,20 +177,24 @@ iframe{
 
 <div class="menu">
 
-<button onclick="showHome()">
+<button onclick="showHome(this)" class="active">
 🏠 Dashboard
 </button>
 
-<button onclick="loadPage('produksi/produksi.html')">
+<button onclick="loadPage('produksi/produksi.html', this)">
 🏭 Produksi
 </button>
 
-<button onclick="loadPage('inventory/inventory.html')">
+<button onclick="loadPage('inventory/inventory.html', this)">
 📦 Inventory
 </button>
 
-<button onclick="loadPage('gokuah/gokuah.html')">
+<button onclick="loadPage('gokuah/gokuah.html', this)">
 🍜 Go Kuah
+</button>
+
+<button onclick="loadPage('sdm/sdm.html', this)">
+👥 SDM
 </button>
 
 </div>
@@ -242,7 +241,7 @@ iframe{
 <br>
 
 <p>
-Pilih menu Produksi, Inventory, atau Go Kuah dari sidebar.
+Pilih menu Produksi, Inventory, Go Kuah, atau SDM dari sidebar.
 </p>
 
 </div>
@@ -266,20 +265,33 @@ new Date().toLocaleDateString("id-ID",{
     year:'numeric'
 });
 
-function loadPage(page){
+function setActive(btn){
+    document.querySelectorAll(".menu button").forEach(function(b){
+        b.classList.remove("active");
+    });
+    if(btn){
+        btn.classList.add("active");
+    }
+}
+
+function loadPage(page, btn){
 
     document.getElementById("homePage").style.display="none";
 
     document.getElementById("mainFrame").style.display="block";
 
     document.getElementById("mainFrame").src=page;
+
+    setActive(btn);
 }
 
-function showHome(){
+function showHome(btn){
 
     document.getElementById("mainFrame").style.display="none";
 
     document.getElementById("homePage").style.display="block";
+
+    setActive(btn);
 }
 
 </script>
