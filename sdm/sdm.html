@@ -1199,27 +1199,66 @@ function toggleAkFields(){
   document.getElementById('ak-fields-admin').classList.toggle('hid',rl!=='admin');
 }
 async function simpanK(){
-  const nm=document.getElementById('ak-nm').value.trim(),jn=document.getElementById('ak-jn').value;
-  const em=document.getElementById('ak-em').value.trim(),rl=document.getElementById('ak-rl').value;
-  const sc=parseInt(document.getElementById('ak-ct').value)||12,ab=document.getElementById('add-k-al');
-  if(!nm||!jn){ab.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Nama dan tanggal bergabung wajib diisi</div>`;return;}
-  if(em&&!validGmail(em)){ab.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Email harus @gmail.com</div>`;return;}
-  let newUser;
-  if(rl==='karyawan'){
-    const tl=document.getElementById('ak-tl').value;
-    if(!tl){ab.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Tanggal lahir wajib diisi untuk akses karyawan</div>`;return;}
-    if(DB.users.find(u=>u.role==='karyawan'&&u.name.trim().toLowerCase()===nm.toLowerCase()&&u.tglLahir===tl)){ab.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Karyawan dengan nama & tanggal lahir ini sudah ada</div>`;return;}
-    const newId=DB.nextId++;
-    newUser={id:newId,username:'kar'+newId,role:'karyawan',name:nm,tglLahir:tl,email:em,initials:ini(nm),active:true,joinDate:jn,totalCuti:sc,sisaCuti:sc};
-  } else {
-    const un=document.getElementById('ak-un').value.trim(),pw=document.getElementById('ak-pw').value.trim();
-    if(!un||!pw){ab.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Username dan password wajib diisi untuk akun admin</div>`;return;}
-    if(DB.users.find(u=>u.username===un)){ab.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Username sudah digunakan</div>`;return;}
-    newUser={id:DB.nextId++,username:un,password:pw,role:'admin',name:nm,email:em,initials:ini(nm),mustChange:true,active:true,joinDate:jn,totalCuti:sc,sisaCuti:sc};
+  // 1. Ambil data dari form input HTML
+  const nm = document.getElementById('ak-nm').value.trim();
+  const jn = document.getElementById('ak-jn').value;
+  const em = document.getElementById('ak-em').value.trim();
+  const rl = document.getElementById('ak-rl').value;
+  const sc = parseInt(document.getElementById('ak-ct').value) || 12;
+  const ab = document.getElementById('add-k-al');
+  
+  // Validasi dasar
+  if(!nm || !jn){
+      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Nama dan tanggal bergabung wajib diisi</div>`;
+      return;
   }
-  DB.users.push(newUser);
-  await saveToSheets('addUser',newUser);
-  document.getElementById('add-k').classList.add('hid');rKT();showToast((rl==='karyawan'?'Karyawan':'Admin')+' berhasil ditambahkan.');
+
+  // 2. Siapkan data sesuai dengan nama kolom di tabel Supabase Anda (tabel 'users')
+  let newUser = {
+      nama_lengkap: nm,
+      email: em,
+      role: rl === 'admin' ? 'Admin' : 'Karyawan',
+      tanggal_bergabung: jn,
+      sisa_cuti: sc,
+      total_cuti: sc,
+      status: 'Aktif'
+  };
+
+  // Tambahkan username (wajib unik di database kita)
+  if(rl === 'karyawan'){
+      // Karena karyawan login pakai nama+tgl lahir, kita buatkan username otomatis untuk database
+      newUser.username = 'kar_' + Math.floor(Math.random() * 10000); 
+  } else {
+      const un = document.getElementById('ak-un').value.trim();
+      const pw = document.getElementById('ak-pw').value.trim(); // (Opsional: simpan pw di db jika perlu)
+      if(!un){
+          ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Username admin wajib diisi</div>`;
+          return;
+      }
+      newUser.username = un;
+  }
+
+  // =========================================================
+  // 3. PROSES INSERT KE SUPABASE (MENGGANTIKAN DATA LOKAL)
+  // =========================================================
+  const { data, error } = await supabaseClient
+      .from('users')
+      .insert([newUser])
+      .select();
+
+  if (error) {
+      console.error("Gagal simpan ke Supabase:", error);
+      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Gagal menyimpan: ${error.message}</div>`;
+  } else {
+      console.log("Berhasil masuk ke Supabase!", data);
+      
+      // Tutup form dan beri notifikasi sukses
+      document.getElementById('add-k').classList.add('hid');
+      showToast((rl === 'karyawan' ? 'Karyawan' : 'Admin') + ' berhasil ditambahkan ke Database!');
+      
+      // PENTING: Untuk sementara biarkan UI me-refresh lokal agar tabel tidak kosong,
+      // Nanti fungsi rKT() (Render Karyawan Table) juga harus diubah untuk membaca dari Supabase
+  }
 }
 function rKT(){
   const tb=document.getElementById('ktb');if(!tb)return;tb.innerHTML='';
