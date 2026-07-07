@@ -1509,16 +1509,12 @@ function simpanProfil(){
   box.innerHTML=changed?`<div class="al al-s">✓ Perubahan berhasil disimpan!</div>`:`<div class="al al-i">Tidak ada perubahan.</div>`;
   if(changed){saveToSheets('updateUser',{id:cu.id,email:cu.email});showToast('Profil diperbarui.');}
 }
-</script> <!-- 1. TUTUP DULU SCRIPT LOGIKA APLIKASI ANDA -->
+</script> <!-- 1. INI ADALAH PENUTUP SCRIPT LOGIKA LOKAL ANDA -->
 
-<!-- 2. BARU PASANG INISIALISASI SUPABASE DI SINI -->
-<script>
-    const SUPABASE_URL = 'https://axehgewoxgzcjxrnoeix.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4ZWhnZXdveGd6Y2p4cm5vZWl4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMxMjcwMTMsImV4cCI6MjA5ODcwMzAxM30.SlNV5YqzMJ5nZ2Yj5YUSmzlWhtUzpgd3heOaby4zGPc';
-    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-</script>
+<!-- 2. HAPUS SCRIPT INISIALISASI SUPABASE DI SINI, KARENA SUDAH ADA DI APP.JS -->
 
-<!-- 3. PANGGIL APP.JS JIKA MEMANG ADA FILE TERPISAH -->
+<!-- 3. LANGSUNG PANGGIL APP.JS -->
+<!-- Pastikan letak file app.js sudah benar. Jika app.js ada di dalam folder js, ubah menjadi src="js/app.js" -->
 <script src="app.js"></script>
 
 <!-- 4. TUTUP HALAMAN HTML DENGAN BENAR -->
