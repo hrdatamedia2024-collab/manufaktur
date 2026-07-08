@@ -310,6 +310,25 @@ tr:hover td{background:#fafafa}
   </div>
 </div>
 
+<!-- EDIT ABSENSI MODAL -->
+<div id="modal-editabs" class="modal-overlay hid">
+  <div class="modal-box">
+    <div style="font-size:15px;font-weight:700;margin-bottom:12px">Edit Data Absensi</div>
+    <div id="modal-editabs-info" style="font-size:13px;color:var(--text2);margin-bottom:12px;padding:8px 12px;background:#fafafa;border-radius:6px"></div>
+    <div class="g2">
+      <div class="fg"><label>Status Kehadiran</label><select id="ea-st"></select></div>
+      <div class="fg"><label>Keterangan</label><input id="ea-ket" placeholder="Opsional"></div>
+      <div class="fg"><label>Jam Masuk</label><input type="time" id="ea-masuk"></div>
+      <div class="fg"><label>Jam Keluar</label><input type="time" id="ea-keluar"></div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-p" onclick="simpanEditAbs()">Simpan Perubahan</button>
+      <button class="btn btn-r" onclick="hapusAbsModal()">🗑 Hapus Data</button>
+      <button class="btn" onclick="closeEditAbs()">Batal</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ============================================================
    CONFIG — MODE LOKAL (TANPA GOOGLE SHEETS)
@@ -337,6 +356,119 @@ console.log   = (...a) => { _origLog(...a);   _debugLog('log',   a); };
 // Semua data disimpan di browser (localStorage) dan bisa diunduh sebagai file Excel (.xlsx) kapan saja.
 const useSheets = false;
 const LOCAL_DB_KEY = 'cutigo_db_v1';
+
+/* ============================================================
+   SUPABASE — SINKRONISASI DATA
+   `supabaseClient` didefinisikan di file terpisah (assets/js/supabase.js)
+   yang dimuat SEBELUM app.js di bagian bawah halaman ini.
+   Nama tabel & kolom di bawah ini mengikuti pola yang sudah dipakai
+   di simpanK() sebelumnya — sesuaikan jika nama kolom di Supabase Anda beda.
+   ============================================================ */
+const TABLE_USERS = 'users';
+const TABLE_ABSENSI = 'absensi';
+
+function isSupabaseReady(){ return typeof supabaseClient !== 'undefined' && !!supabaseClient; }
+
+// Pembungkus aman untuk semua panggilan Supabase — tidak pernah melempar error ke UI,
+// cukup mencatat di console/debug panel dan aplikasi tetap jalan pakai data lokal.
+async function supaTry(promise, label){
+  if(!isSupabaseReady()){ console.warn(`[Supabase] Belum terhubung — "${label}" hanya tersimpan lokal.`); return {data:null,error:null,offline:true}; }
+  try{
+    const r = await promise;
+    if(r.error) console.error(`[Supabase] Gagal ${label}:`, r.error.message);
+    return r;
+  }catch(e){ console.error(`[Supabase] Error ${label}:`, e.message); return {data:null,error:e}; }
+}
+
+function userToRow(u){
+  return {
+    nama_lengkap: u.name,
+    email: u.email || '',
+    role: u.role === 'admin' ? 'Admin' : 'Karyawan',
+    tanggal_bergabung: u.joinDate || null,
+    sisa_cuti: u.sisaCuti,
+    total_cuti: u.totalCuti,
+    status: u.active ? 'Aktif' : 'Nonaktif',
+    username: u.username || null,
+    tanggal_lahir: u.tglLahir || null,
+    password: u.password || null
+  };
+}
+async function updateUserSupabase(u){
+  const row = userToRow(u);
+  if(u.supaId){ return supaTry(supabaseClient.from(TABLE_USERS).update(row).eq('id', u.supaId), 'update karyawan'); }
+  if(u.username){ return supaTry(supabaseClient.from(TABLE_USERS).update(row).eq('username', u.username), 'update karyawan'); }
+  console.warn('[Supabase] Tidak ada id/username untuk update karyawan — data ini mungkin belum pernah tersimpan di Supabase.');
+}
+async function deleteUserSupabase(u){
+  if(u.supaId){ return supaTry(supabaseClient.from(TABLE_USERS).delete().eq('id', u.supaId), 'hapus karyawan'); }
+  if(u.username){ return supaTry(supabaseClient.from(TABLE_USERS).delete().eq('username', u.username), 'hapus karyawan'); }
+  console.warn('[Supabase] Tidak ada id/username untuk hapus karyawan — hanya dihapus dari lokal.');
+}
+
+function absensiToRow(a){
+  return {
+    karyawan_id: a.supaKaryawanId || null,
+    nama_karyawan: a.empName,
+    tanggal: a.tgl,
+    status: a.status,
+    jam_masuk: a.jamMasuk || null,
+    jam_keluar: a.jamKeluar || null,
+    keterangan: a.ket || ''
+  };
+}
+// Upsert berdasarkan (nama_karyawan, tanggal). Buat unique constraint pada
+// kedua kolom ini di tabel `absensi` Supabase Anda supaya upsert bekerja optimal.
+async function syncAbsensiSupabase(a){
+  const row = absensiToRow(a);
+  const r = await supaTry(
+    supabaseClient.from(TABLE_ABSENSI).upsert([row], {onConflict:'nama_karyawan,tanggal'}).select(),
+    'simpan absensi'
+  );
+  if(r.data && r.data[0]) a.supaId = r.data[0].id;
+  return r;
+}
+async function deleteAbsensiSupabase(a){
+  if(a.supaId){ return supaTry(supabaseClient.from(TABLE_ABSENSI).delete().eq('id', a.supaId), 'hapus absensi'); }
+  return supaTry(supabaseClient.from(TABLE_ABSENSI).delete().eq('nama_karyawan', a.empName).eq('tanggal', a.tgl), 'hapus absensi');
+}
+
+// Ambil data terbaru dari Supabase saat aplikasi dibuka (jika terhubung & online).
+// Jika gagal/offline, aplikasi tetap jalan pakai data lokal (localStorage/data contoh).
+async function initSupabaseData(){
+  if(!isSupabaseReady()) return;
+  const [uRes, aRes] = await Promise.all([
+    supaTry(supabaseClient.from(TABLE_USERS).select('*'), 'ambil data karyawan'),
+    supaTry(supabaseClient.from(TABLE_ABSENSI).select('*'), 'ambil data absensi')
+  ]);
+  if(uRes.data && uRes.data.length){
+    DB.users = uRes.data.map(r=>({
+      id: r.id, supaId: r.id,
+      username: r.username || '', password: r.password || '',
+      role: (r.role||'').toLowerCase()==='admin' ? 'admin' : 'karyawan',
+      name: r.nama_lengkap || '(Tanpa nama)',
+      tglLahir: r.tanggal_lahir || '',
+      email: r.email || '',
+      initials: ini(r.nama_lengkap || '- -'),
+      mustChange: false,
+      active: (r.status || 'Aktif') === 'Aktif',
+      joinDate: r.tanggal_bergabung || '',
+      totalCuti: r.total_cuti ?? 12,
+      sisaCuti: r.sisa_cuti ?? 12
+    }));
+    DB.nextId = Math.max(0,...DB.users.map(u=>u.id))+1;
+  }
+  if(aRes.data && aRes.data.length){
+    DB.absensi = aRes.data.map((r,i)=>{
+      const kar = DB.users.find(u=>u.name===r.nama_karyawan);
+      return { id:i+1, supaId:r.id, empId: kar?kar.id:0, empName:r.nama_karyawan,
+        tgl:r.tanggal, status:r.status, jamMasuk:r.jam_masuk||'', jamKeluar:r.jam_keluar||'', ket:r.keterangan||'' };
+    });
+    DB.nextAbsId = DB.absensi.length+1;
+  }
+  saveLocalDB();
+  console.log('[Supabase] Data karyawan & absensi tersinkron dari database.');
+}
 
 /* ============================================================
    STATUS ABSENSI — KODE DAN LABEL
@@ -509,13 +641,14 @@ function exportPengajuanExcel(){
 }
 
 function exportReportExcel(){
-  const containers={ringkasan:'rp-ringkasan',detail:'rp-detail',heatmap:'rp-heatmap',ranking:'rp-ranking'};
+  const containers={ringkasan:'rp-ringkasan',detail:'rp-detail',heatmap:'rp-heatmap',ranking:'rp-ranking',telat:'rp-telat'};
   const el=document.getElementById(containers[reportTab]);
   const table=el?el.querySelector('table'):null;
-  if(!table){showToast('Tab ini tidak memiliki tabel untuk diexport. Coba tab Ringkasan atau Detail Harian.',false);return;}
+  if(!table){showToast('Tab ini tidak memiliki tabel untuk diexport. Coba tab Ringkasan, Detail Harian, atau Absen Telat.',false);return;}
   if(!xlsxReady())return;
-  const wb=XLSX.utils.table_to_book(table,{sheet:'Report'});
-  XLSX.writeFile(wb,`Report_Absensi_${tglFile()}.xlsx`);
+  const wb=XLSX.utils.table_to_book(table,{sheet:reportTab==='telat'?'Absen Telat':'Report'});
+  const fname=reportTab==='telat'?`Rekap_Absen_Telat_${tglFile()}.xlsx`:`Report_Absensi_${tglFile()}.xlsx`;
+  XLSX.writeFile(wb,fname);
   showToast('Report berhasil diexport ke Excel.');
 }
 
@@ -561,6 +694,9 @@ let cu=null,calYear=2026,calMonth=4,tolakModalId=null,reportTab='ringkasan',cloc
 
 // Muat data tersimpan sebelumnya (jika ada) dari localStorage saat aplikasi dibuka
 loadLocalDB();
+// `supabase.js` dimuat di bagian BAWAH halaman (setelah script ini), jadi kita
+// tunggu window 'load' supaya `supabaseClient` sudah pasti terdefinisi sebelum dipakai.
+window.addEventListener('load', initSupabaseData);
 
 function switchLoginTab(mode){
   loginMode=mode;
@@ -989,11 +1125,12 @@ async function simpanAbs(){
   const st=document.getElementById('aaf-st').value,masuk=document.getElementById('aaf-masuk').value;
   const keluar=document.getElementById('aaf-keluar').value,ket=document.getElementById('aaf-ket').value.trim();
   const kar=gu(karId);if(!tgl){alert('Pilih tanggal');return;}
-  const ex=DB.absensi.find(a=>a.empId===karId&&a.tgl===tgl);
-  if(ex){ex.status=st;ex.jamMasuk=masuk;ex.jamKeluar=keluar;ex.ket=ket;}
-  else DB.absensi.push({id:DB.nextAbsId++,empId:karId,empName:kar.name,tgl,status:st,jamMasuk:masuk,jamKeluar:keluar,ket});
+  let row=DB.absensi.find(a=>a.empId===karId&&a.tgl===tgl);
+  if(row){row.status=st;row.jamMasuk=masuk;row.jamKeluar=keluar;row.ket=ket;}
+  else{row={id:DB.nextAbsId++,empId:karId,supaKaryawanId:kar.supaId||null,empName:kar.name,tgl,status:st,jamMasuk:masuk,jamKeluar:keluar,ket};DB.absensi.push(row);}
   await saveToSheets('saveAbsensi',{empId:karId,empName:kar.name,tgl,status:st,jamMasuk:masuk,jamKeluar:keluar,ket});
-  toggleAddAbs();rAbsTable();showToast('Data absensi disimpan.');
+  await syncAbsensiSupabase(row);
+  toggleAddAbs();rAbsTable();showToast('Data absensi disimpan'+(isSupabaseReady()?' & disinkronkan ke Supabase.':' secara lokal.'));
 }
 function rAbsTable(){
   const tb=document.getElementById('abs-table');if(!tb)return;
@@ -1014,15 +1151,34 @@ function rAbsTable(){
     </div>`;
   } else if(sumEl) sumEl.innerHTML='';
 }
-async function editAbs(id){
-  const a=DB.absensi.find(x=>x.id===id);if(!a)return;
-  const opts=Object.entries(STATUS_ABS).map(([k,v])=>`${k} = ${v.label}`).join('\n');
-  const st=prompt(`Kode status:\n${opts}\n\nStatus saat ini: [${a.status}]`,a.status);
-  if(!st)return;if(!STATUS_ABS[st]){alert('Kode tidak valid. Gunakan: '+Object.keys(STATUS_ABS).join(', '));return;}
-  const ket=prompt('Keterangan:',a.ket)||'';
-  a.status=st.toLowerCase();a.ket=ket;
+let editAbsId=null;
+function editAbs(id){
+  const a=DB.absensi.find(x=>x.id===id);if(!a)return;editAbsId=id;
+  document.getElementById('modal-editabs-info').textContent=`${a.empName} — ${fd(a.tgl)}`;
+  document.getElementById('ea-st').innerHTML=Object.entries(STATUS_ABS).map(([k,v])=>`<option value="${k}" ${k===a.status?'selected':''}>${v.label} [${k}]</option>`).join('');
+  document.getElementById('ea-ket').value=a.ket||'';
+  document.getElementById('ea-masuk').value=a.jamMasuk||'';
+  document.getElementById('ea-keluar').value=a.jamKeluar||'';
+  document.getElementById('modal-editabs').classList.remove('hid');
+}
+function closeEditAbs(){document.getElementById('modal-editabs').classList.add('hid');editAbsId=null;}
+async function simpanEditAbs(){
+  const a=DB.absensi.find(x=>x.id===editAbsId);if(!a)return;
+  a.status=document.getElementById('ea-st').value;
+  a.ket=document.getElementById('ea-ket').value.trim();
+  a.jamMasuk=document.getElementById('ea-masuk').value;
+  a.jamKeluar=document.getElementById('ea-keluar').value;
   await saveToSheets('updateAbsensi',{...a});
-  rAbsTable();showToast('Data diperbarui & tersimpan lokal.');
+  await syncAbsensiSupabase(a);
+  closeEditAbs();rAbsTable();showToast('Data absensi diperbarui'+(isSupabaseReady()?' & disinkronkan ke Supabase.':' secara lokal.'));
+}
+async function hapusAbsModal(){
+  const a=DB.absensi.find(x=>x.id===editAbsId);if(!a)return;
+  if(!confirm(`Hapus data absensi ${a.empName} tanggal ${fd(a.tgl)}? Tindakan ini tidak bisa dibatalkan.`))return;
+  await deleteAbsensiSupabase(a);
+  DB.absensi=DB.absensi.filter(x=>x.id!==editAbsId);
+  saveLocalDB();
+  closeEditAbs();rAbsTable();showToast('Data absensi dihapus.');
 }
 
 /* ============================================================
@@ -1051,15 +1207,17 @@ function rReport(){
       <div class="tab" id="rp-tab-detail" onclick="switchRpTab('detail')">Detail Harian</div>
       <div class="tab" id="rp-tab-heatmap" onclick="switchRpTab('heatmap')">Peta Kehadiran</div>
       <div class="tab" id="rp-tab-ranking" onclick="switchRpTab('ranking')">Ranking</div>
+      <div class="tab" id="rp-tab-telat" onclick="switchRpTab('telat')">⏰ Absen Telat</div>
     </div>
     <div id="rp-ringkasan"></div>
     <div id="rp-detail" style="display:none"></div>
     <div id="rp-heatmap" style="display:none"></div>
     <div id="rp-ranking" style="display:none"></div>
+    <div id="rp-telat" style="display:none"></div>
   </div>`;loadReport();
 }
 function switchRpTab(t){
-  reportTab=t;['ringkasan','detail','heatmap','ranking'].forEach(x=>{document.getElementById('rp-tab-'+x)?.classList.toggle('on',x===t);const s=document.getElementById('rp-'+x);if(s)s.style.display=x===t?'':'none';});loadReport();
+  reportTab=t;['ringkasan','detail','heatmap','ranking','telat'].forEach(x=>{document.getElementById('rp-tab-'+x)?.classList.toggle('on',x===t);const s=document.getElementById('rp-'+x);if(s)s.style.display=x===t?'':'none';});loadReport();
 }
 function getRpData(){const bulan=document.getElementById('rp-bulan')?.value||'2026-05',karId=document.getElementById('rp-kar')?.value;return DB.absensi.filter(a=>{const m=a.tgl.startsWith(bulan);return karId?m&&a.empId===parseInt(karId):m;});}
 function getRpKar(){const karId=document.getElementById('rp-kar')?.value,kary=DB.users.filter(u=>u.role==='karyawan');return karId?kary.filter(k=>k.id===parseInt(karId)):kary;}
@@ -1069,7 +1227,45 @@ function getStat(data,empId){
   s.hadirTotal=(s.h||0)+(s.st||0);return s;
 }
 function getHK(){const bulan=document.getElementById('rp-bulan')?.value||'2026-05';const[yr,mo]=bulan.split('-').map(Number);return hariKerja(yr,mo-1);}
-function loadReport(){if(reportTab==='ringkasan')rpRingkasan();else if(reportTab==='detail')rpDetail();else if(reportTab==='heatmap')rpHeatmap();else if(reportTab==='ranking')rpRanking();}
+function loadReport(){if(reportTab==='ringkasan')rpRingkasan();else if(reportTab==='detail')rpDetail();else if(reportTab==='heatmap')rpHeatmap();else if(reportTab==='ranking')rpRanking();else if(reportTab==='telat')rpTelat();}
+
+/* ============================================================
+   REKAP ABSEN TELAT
+   ============================================================ */
+function getJamNormal(){ return localStorage.getItem('cutigo_jam_normal') || '08:00'; }
+function setJamNormal(v){ localStorage.setItem('cutigo_jam_normal', v); loadReport(); }
+function getTelatList(){
+  const jn=getJamNormal();
+  return getRpData()
+    .filter(a=>a.jamMasuk && a.jamMasuk>jn)
+    .map(a=>{
+      const [nh,nm]=jn.split(':').map(Number),[ah,am]=a.jamMasuk.split(':').map(Number);
+      return {nama:a.empName,tanggal:a.tgl,jamMasuk:a.jamMasuk,telatMenit:(ah*60+am)-(nh*60+nm)};
+    })
+    .sort((x,y)=>y.tanggal.localeCompare(x.tanggal)||y.telatMenit-x.telatMenit);
+}
+function rpTelat(){
+  const el=document.getElementById('rp-telat');const jn=getJamNormal();const list=getTelatList();
+  const perKar={};list.forEach(t=>{perKar[t.nama]=(perKar[t.nama]||0)+1;});
+  let html=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+    <label style="font-size:12px;font-weight:600;color:var(--text2)">Jam Masuk Normal:</label>
+    <input type="time" value="${jn}" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px" onchange="setJamNormal(this.value)">
+    <span style="font-size:11px;color:var(--text2)">Karyawan dianggap terlambat jika jam masuk melewati waktu ini.</span>
+  </div>`;
+  if(!list.length){
+    html+=`<div style="color:var(--text2);text-align:center;padding:20px">Tidak ada data keterlambatan pada periode ini. 🎉</div>`;
+    el.innerHTML=html;return;
+  }
+  if(Object.keys(perKar).length>1){
+    html+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      ${Object.entries(perKar).sort((a,b)=>b[1]-a[1]).map(([nm,c])=>`<span class="chip chip-st">${nm}: ${c}x telat</span>`).join('')}
+    </div>`;
+  }
+  html+=`<table id="tbl-telat"><thead><tr><th style="width:32%">Nama</th><th style="width:20%">Tanggal</th><th style="width:18%">Jam Masuk</th><th style="width:30%">Telat</th></tr></thead><tbody>
+    ${list.map(t=>`<tr><td>${t.nama}</td><td>${fd(t.tanggal)}</td><td>${t.jamMasuk}</td><td><span class="chip chip-st">${t.telatMenit} menit</span></td></tr>`).join('')}
+  </tbody></table>`;
+  el.innerHTML=html;
+}
 
 function rpRingkasan(){
   const data=getRpData(),karList=getRpKar(),hk=getHK(),stat=getStat(data),el=document.getElementById('rp-ringkasan');
@@ -1214,6 +1410,8 @@ async function simpanK(){
   }
 
   // 2. Siapkan data sesuai dengan nama kolom di tabel Supabase Anda (tabel 'users')
+  let tglLahir = '';
+  let pw = '';
   let newUser = {
       nama_lengkap: nm,
       email: em,
@@ -1226,39 +1424,55 @@ async function simpanK(){
 
   // Tambahkan username (wajib unik di database kita)
   if(rl === 'karyawan'){
+      tglLahir = document.getElementById('ak-tl').value;
+      if(!tglLahir){ ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Tanggal lahir wajib diisi (dipakai untuk login karyawan)</div>`; return; }
+      newUser.tanggal_lahir = tglLahir;
       // Karena karyawan login pakai nama+tgl lahir, kita buatkan username otomatis untuk database
-      newUser.username = 'kar_' + Math.floor(Math.random() * 10000); 
+      newUser.username = 'kar_' + Math.floor(Math.random() * 10000);
   } else {
       const un = document.getElementById('ak-un').value.trim();
-      const pw = document.getElementById('ak-pw').value.trim(); // (Opsional: simpan pw di db jika perlu)
+      pw = document.getElementById('ak-pw').value.trim();
       if(!un){
           ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Username admin wajib diisi</div>`;
           return;
       }
+      if(!pw || pw.length<6){
+          ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Password awal minimal 6 karakter</div>`;
+          return;
+      }
       newUser.username = un;
+      newUser.password = pw;
   }
 
   // =========================================================
-  // 3. PROSES INSERT KE SUPABASE (MENGGANTIKAN DATA LOKAL)
+  // 3. PROSES INSERT KE SUPABASE (jika terhubung), lalu simpan juga ke lokal
   // =========================================================
-  const { data, error } = await supabaseClient
-      .from('users')
-      .insert([newUser])
-      .select();
-
-  if (error) {
-      console.error("Gagal simpan ke Supabase:", error);
-      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Gagal menyimpan: ${error.message}</div>`;
+  let supaId = null;
+  if(isSupabaseReady()){
+    const { data, error } = await supabaseClient.from(TABLE_USERS).insert([newUser]).select();
+    if(error){
+      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Gagal menyimpan ke Supabase: ${error.message}</div>`;
+      return;
+    }
+    if(data && data[0]) supaId = data[0].id;
   } else {
-      console.log("Berhasil masuk ke Supabase!", data);
-      
-      // Tutup form dan beri notifikasi sukses
-      document.getElementById('add-k').classList.add('hid');
-      showToast((rl === 'karyawan' ? 'Karyawan' : 'Admin') + ' berhasil ditambahkan ke Database!');
-      
-      // PENTING: Untuk sementara biarkan UI me-refresh lokal agar tabel tidak kosong,
-      // Nanti fungsi rKT() (Render Karyawan Table) juga harus diubah untuk membaca dari Supabase
+    console.warn('[Supabase] Belum terhubung — karyawan baru hanya tersimpan lokal.');
   }
+
+  // 4. Tambahkan ke data lokal supaya langsung tampil di tabel
+  const localUser = {
+    id: DB.nextId++, supaId,
+    username: newUser.username, password: rl==='admin'?pw:undefined,
+    role: rl, name: nm, tglLahir: tglLahir||'', email: em,
+    initials: ini(nm), mustChange: rl==='admin', active: true,
+    joinDate: jn, totalCuti: sc, sisaCuti: sc
+  };
+  DB.users.push(localUser);
+  saveLocalDB();
+
+  document.getElementById('add-k').classList.add('hid');
+  showToast((rl === 'karyawan' ? 'Karyawan' : 'Admin') + ' berhasil ditambahkan' + (isSupabaseReady()?' & disinkronkan ke Supabase!':' (lokal, Supabase belum terhubung).'));
+  rKT();
 }
 function rKT(){
   const tb=document.getElementById('ktb');if(!tb)return;tb.innerHTML='';
@@ -1268,11 +1482,21 @@ function rKT(){
     <td>${akses}</td><td style="font-size:12px;color:var(--text2)">${u.email||'-'}</td><td>${fd(u.joinDate)}</td>
     <td><div style="font-size:12px;margin-bottom:3px">${u.sisaCuti}/${u.totalCuti} hari</div><div class="bar-wrap" style="height:5px"><div class="bar-fill" style="width:${pct}%;background:${pctClr(pct)}"></div></div></td>
     <td><span class="chip ${u.active?'chip-ok':'chip-off'}">${u.active?'Aktif':'Nonaktif'}</span></td>
-    <td><button class="btn btn-xs" style="margin-bottom:3px" onclick="editK(${u.id})">Edit</button>${u.id!==cu.id?`<br><button class="btn btn-xs ${u.active?'btn-r':''}" onclick="togK(${u.id})">${u.active?'Off':'On'}</button>`:''}</td>`;
+    <td><button class="btn btn-xs" style="margin-bottom:3px" onclick="editK(${u.id})">Edit</button>${u.id!==cu.id?`<br><button class="btn btn-xs ${u.active?'btn-r':''}" style="margin-bottom:3px" onclick="togK(${u.id})">${u.active?'Off':'On'}</button><br><button class="btn btn-xs btn-r" onclick="hapusK(${u.id})">Hapus</button>`:''}</td>`;
     tb.appendChild(tr);
   });
 }
-async function togK(id){const u=gu(id);if(u){u.active=!u.active;await saveToSheets('updateUser',{id:u.id,active:u.active});rKT();showToast((u.active?'Akun diaktifkan.':'Akun dinonaktifkan.'));}}
+async function togK(id){const u=gu(id);if(u){u.active=!u.active;await saveToSheets('updateUser',{id:u.id,active:u.active});await updateUserSupabase(u);rKT();showToast((u.active?'Akun diaktifkan.':'Akun dinonaktifkan.'));}}
+async function hapusK(id){
+  const u=gu(id);if(!u)return;
+  if(u.id===cu.id){alert('Tidak bisa menghapus akun yang sedang digunakan.');return;}
+  if(!confirm(`Hapus karyawan "${u.name}" secara permanen dari sistem (termasuk Supabase)?\nData absensi/pengajuan lama miliknya tidak ikut terhapus otomatis.\nTindakan ini tidak bisa dibatalkan.`))return;
+  await deleteUserSupabase(u);
+  DB.users=DB.users.filter(x=>x.id!==id);
+  saveLocalDB();
+  rKT();
+  showToast(`Karyawan "${u.name}" telah dihapus.`);
+}
 async function editK(id){
   const u=gu(id);if(!u)return;const nm=prompt('Nama:',u.name);if(nm===null)return;
   const em=prompt('Gmail:',u.email);if(em===null)return;if(em&&!validGmail(em)){alert('Harus @gmail.com');return;}
@@ -1284,7 +1508,9 @@ async function editK(id){
     if(tl!==null&&/^\d{4}-\d{2}-\d{2}$/.test(tl.trim()))u.tglLahir=tl.trim();
   }
   await saveToSheets('updateUser',{id:u.id,name:u.name,email:u.email,sisaCuti:u.sisaCuti,totalCuti:u.totalCuti,tglLahir:u.tglLahir});
-  rKT();showToast('Data diperbarui & tersimpan lokal.');
+  await updateUserSupabase(u);
+  u.initials=ini(u.name);
+  rKT();showToast('Data diperbarui'+(isSupabaseReady()?' & disinkronkan ke Supabase.':' & tersimpan lokal.'));
 }
 
 /* ============================================================
@@ -1311,8 +1537,8 @@ function rAkun(){
     tb.appendChild(tr);
   });
 }
-async function togA(id){const u=gu(id);if(u){u.active=!u.active;await saveToSheets('updateUser',{id:u.id,active:u.active});rAkun();showToast(u.active?'Akun diaktifkan.':'Akun dinonaktifkan.');}}
-async function resetPW(id){const u=gu(id);if(!u)return;const pw=prompt(`Reset password ${u.name}:`);if(!pw||pw.length<6){if(pw!==null)alert('Min 6 karakter');return;}u.password=pw;u.mustChange=true;await saveToSheets('updateUser',{id:u.id,password:pw,mustChange:true});showToast(`Password ${u.name} direset & tersimpan lokal.`);rAkun();}
+async function togA(id){const u=gu(id);if(u){u.active=!u.active;await saveToSheets('updateUser',{id:u.id,active:u.active});await updateUserSupabase(u);rAkun();showToast(u.active?'Akun diaktifkan.':'Akun dinonaktifkan.');}}
+async function resetPW(id){const u=gu(id);if(!u)return;const pw=prompt(`Reset password ${u.name}:`);if(!pw||pw.length<6){if(pw!==null)alert('Min 6 karakter');return;}u.password=pw;u.mustChange=true;await saveToSheets('updateUser',{id:u.id,password:pw,mustChange:true});await updateUserSupabase(u);showToast(`Password ${u.name} direset`+(isSupabaseReady()?' & disinkronkan.':' & tersimpan lokal.'));rAkun();}
 
 /* ============================================================
    PENGAJUAN CUTI
@@ -1550,7 +1776,9 @@ function simpanProfil(){
 }
 </script> <!-- 1. INI ADALAH PENUTUP SCRIPT LOGIKA LOKAL ANDA -->
 
-<!-- 2. HAPUS SCRIPT INISIALISASI SUPABASE DI SINI, KARENA SUDAH ADA DI APP.JS -->
+<!-- 2. MUAT FILE SUPABASE.JS (berisi inisialisasi `supabaseClient`) SEBELUM app.js -->
+<!-- Sesuaikan path jika lokasi file berbeda -->
+<script src="../assets/js/supabase.js"></script>
 
 <!-- 3. LANGSUNG PANGGIL APP.JS -->
 <!-- Pastikan letak file app.js sudah benar. Jika app.js ada di dalam folder js, ubah menjadi src="js/app.js" -->
