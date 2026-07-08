@@ -220,7 +220,7 @@ tr:hover td{background:#fafafa}
       <button type="button" class="login-tab" id="ltab-adm" onclick="switchLoginTab('admin')">Admin</button>
     </div>
     <div id="la"></div>
-    <div id="debug-panel" style="display:none;margin-bottom:12px;padding:10px;background:#f3f4f6;border-radius:6px;font-size:11px;font-family:monospace;max-height:120px;overflow-y:auto;color:#374151" id="debug-log"></div>
+    <div id="debug-log" style="display:none;margin-bottom:12px;padding:10px;background:#f3f4f6;border-radius:6px;font-size:11px;font-family:monospace;max-height:120px;overflow-y:auto;color:#374151"></div>
 
     <!-- AKSES KARYAWAN: Nama Lengkap + Tanggal Lahir -->
     <div id="login-karyawan">
@@ -434,7 +434,10 @@ async function deleteAbsensiSupabase(a){
 }
 
 // Ambil data terbaru dari Supabase saat aplikasi dibuka (jika terhubung & online).
-// Jika gagal/offline, aplikasi tetap jalan pakai data lokal (localStorage/data contoh).
+// PENTING: ini MENGGABUNGKAN (merge) data Supabase ke data lokal berdasarkan
+// username — BUKAN menimpa semuanya. Ini sengaja, supaya kalau kolom tertentu
+// (misalnya `password`) belum terisi/tidak ada di tabel Supabase Anda, akun
+// yang sudah bisa login secara lokal tidak ikut rusak / terkunci.
 async function initSupabaseData(){
   if(!isSupabaseReady()) return;
   const [uRes, aRes] = await Promise.all([
@@ -442,29 +445,37 @@ async function initSupabaseData(){
     supaTry(supabaseClient.from(TABLE_ABSENSI).select('*'), 'ambil data absensi')
   ]);
   if(uRes.data && uRes.data.length){
-    DB.users = uRes.data.map(r=>({
-      id: r.id, supaId: r.id,
-      username: r.username || '', password: r.password || '',
-      role: (r.role||'').toLowerCase()==='admin' ? 'admin' : 'karyawan',
-      name: r.nama_lengkap || '(Tanpa nama)',
-      tglLahir: r.tanggal_lahir || '',
-      email: r.email || '',
-      initials: ini(r.nama_lengkap || '- -'),
-      mustChange: false,
-      active: (r.status || 'Aktif') === 'Aktif',
-      joinDate: r.tanggal_bergabung || '',
-      totalCuti: r.total_cuti ?? 12,
-      sisaCuti: r.sisa_cuti ?? 12
-    }));
-    DB.nextId = Math.max(0,...DB.users.map(u=>u.id))+1;
+    uRes.data.forEach(r=>{
+      const existing = DB.users.find(u=>u.supaId===r.id) || (r.username && DB.users.find(u=>u.username===r.username));
+      const mapped = {
+        supaId: r.id,
+        username: r.username || existing?.username || '',
+        // Jangan timpa password lokal yang valid dengan nilai kosong dari Supabase
+        password: (r.password!==null && r.password!==undefined && r.password!=='') ? r.password : existing?.password,
+        role: (r.role||'').toLowerCase()==='admin' ? 'admin' : 'karyawan',
+        name: r.nama_lengkap || existing?.name || '(Tanpa nama)',
+        tglLahir: r.tanggal_lahir || existing?.tglLahir || '',
+        email: r.email || existing?.email || '',
+        mustChange: existing ? existing.mustChange : false,
+        active: (r.status || 'Aktif') === 'Aktif',
+        joinDate: r.tanggal_bergabung || existing?.joinDate || '',
+        totalCuti: r.total_cuti ?? existing?.totalCuti ?? 12,
+        sisaCuti: r.sisa_cuti ?? existing?.sisaCuti ?? 12
+      };
+      mapped.initials = ini(mapped.name);
+      if(existing){ Object.assign(existing, mapped); }
+      else{ DB.users.push({ id: DB.nextId++, ...mapped }); }
+    });
   }
   if(aRes.data && aRes.data.length){
-    DB.absensi = aRes.data.map((r,i)=>{
+    aRes.data.forEach(r=>{
+      let existing = DB.absensi.find(a=>a.supaId===r.id) || DB.absensi.find(a=>a.empName===r.nama_karyawan && a.tgl===r.tanggal);
       const kar = DB.users.find(u=>u.name===r.nama_karyawan);
-      return { id:i+1, supaId:r.id, empId: kar?kar.id:0, empName:r.nama_karyawan,
+      const mapped = { supaId:r.id, empId: kar?kar.id:(existing?.empId||0), empName:r.nama_karyawan,
         tgl:r.tanggal, status:r.status, jamMasuk:r.jam_masuk||'', jamKeluar:r.jam_keluar||'', ket:r.keterangan||'' };
+      if(existing){ Object.assign(existing, mapped); }
+      else{ DB.absensi.push({ id: DB.nextAbsId++, ...mapped }); }
     });
-    DB.nextAbsId = DB.absensi.length+1;
   }
   saveLocalDB();
   console.log('[Supabase] Data karyawan & absensi tersinkron dari database.');
