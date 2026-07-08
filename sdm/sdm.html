@@ -1159,7 +1159,7 @@ function rpRanking(){
 }
 
 /* ============================================================
-   DATA KARYAWAN
+   DATA KARYAWAN (UPDATE: SIMPAN KE SUPABASE)
    ============================================================ */
 function rKar(){
   const el=document.getElementById('view-karyawan');
@@ -1187,34 +1187,41 @@ function rKar(){
         <div class="fg"><label>Password Awal</label><input id="ak-pw" placeholder="Sementara, wajib diganti"></div>
       </div>
       <div id="add-k-al"></div>
-      <div style="display:flex;gap:8px"><button class="btn btn-p" onclick="simpanK()">Simpan</button><button class="btn" onclick="document.getElementById('add-k').classList.add('hid')">Batal</button></div>
+      <div style="display:flex;gap:8px"><button class="btn btn-p" onclick="simpanK()">Simpan ke Supabase</button><button class="btn" onclick="document.getElementById('add-k').classList.add('hid')">Batal</button></div>
     </div>
     <table id="tbl-karyawan"><thead><tr><th style="width:20%">Nama</th><th style="width:14%">Role / Akses</th><th style="width:21%">Gmail</th><th style="width:12%">Bergabung</th><th style="width:14%">Saldo Cuti</th><th style="width:8%">Status</th><th style="width:11%">Aksi</th></tr></thead>
     <tbody id="ktb"></tbody></table>
   </div>`;rKT();
 }
+
 function toggleAkFields(){
   const rl=document.getElementById('ak-rl').value;
   document.getElementById('ak-fields-karyawan').classList.toggle('hid',rl!=='karyawan');
   document.getElementById('ak-fields-admin').classList.toggle('hid',rl!=='admin');
 }
+
+// -------------------------------------------------------------
+// FUNGSI BARU: SIMPAN KARYAWAN LANGSUNG KE SUPABASE
+// -------------------------------------------------------------
 async function simpanK(){
-  // 1. Ambil data dari form input HTML
   const nm = document.getElementById('ak-nm').value.trim();
   const jn = document.getElementById('ak-jn').value;
   const em = document.getElementById('ak-em').value.trim();
   const rl = document.getElementById('ak-rl').value;
   const sc = parseInt(document.getElementById('ak-ct').value) || 12;
   const ab = document.getElementById('add-k-al');
-  
-  // Validasi dasar
+
   if(!nm || !jn){
       ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Nama dan tanggal bergabung wajib diisi</div>`;
       return;
   }
+  if(em && !validGmail(em)){
+      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Email harus @gmail.com</div>`;
+      return;
+  }
 
-  // 2. Siapkan data sesuai dengan nama kolom di tabel Supabase Anda (tabel 'users')
-  let newUser = {
+  // Siapkan data untuk dikirim ke tabel 'users' di Supabase
+  let newUserDB = {
       nama_lengkap: nm,
       email: em,
       role: rl === 'admin' ? 'Admin' : 'Karyawan',
@@ -1224,42 +1231,63 @@ async function simpanK(){
       status: 'Aktif'
   };
 
-  // Tambahkan username (wajib unik di database kita)
+  // Objek lokal sementara agar UI tetap update sebelum reload page
+  let localUser = {
+      id: DB.nextId++,
+      role: rl,
+      name: nm,
+      email: em,
+      initials: ini(nm),
+      active: true,
+      joinDate: jn,
+      totalCuti: sc,
+      sisaCuti: sc
+  };
+
   if(rl === 'karyawan'){
-      // Karena karyawan login pakai nama+tgl lahir, kita buatkan username otomatis untuk database
-      newUser.username = 'kar_' + Math.floor(Math.random() * 10000); 
-  } else {
-      const un = document.getElementById('ak-un').value.trim();
-      const pw = document.getElementById('ak-pw').value.trim(); // (Opsional: simpan pw di db jika perlu)
-      if(!un){
-          ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Username admin wajib diisi</div>`;
+      const tl = document.getElementById('ak-tl').value;
+      if(!tl){
+          ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Tanggal lahir wajib diisi untuk akses karyawan</div>`;
           return;
       }
-      newUser.username = un;
+      newUserDB.username = 'kar_' + Math.floor(Math.random() * 10000);
+      localUser.tglLahir = tl;
+      localUser.username = newUserDB.username;
+  } else {
+      const un = document.getElementById('ak-un').value.trim();
+      const pw = document.getElementById('ak-pw').value.trim();
+      if(!un || !pw){
+          ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Username dan password wajib diisi</div>`;
+          return;
+      }
+      newUserDB.username = un;
+      localUser.username = un;
+      localUser.password = pw;
+      localUser.mustChange = true;
   }
 
-  // =========================================================
-  // 3. PROSES INSERT KE SUPABASE (MENGGANTIKAN DATA LOKAL)
-  // =========================================================
+  // 1. Eksekusi Insert Data ke Supabase (Menggunakan variabel supabaseClient dari app.js)
   const { data, error } = await supabaseClient
       .from('users')
-      .insert([newUser])
+      .insert([newUserDB])
       .select();
 
   if (error) {
       console.error("Gagal simpan ke Supabase:", error);
-      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Gagal menyimpan: ${error.message}</div>`;
+      ab.innerHTML = `<div class="al al-e" style="margin-bottom:8px">Gagal database: ${error.message}</div>`;
   } else {
-      console.log("Berhasil masuk ke Supabase!", data);
+      console.log("✅ Berhasil masuk ke Supabase!", data);
       
-      // Tutup form dan beri notifikasi sukses
+      // 2. Update UI (Render ulang tabel agar karyawan terlihat tanpa harus me-refresh halaman)
+      DB.users.push(localUser); 
       document.getElementById('add-k').classList.add('hid');
-      showToast((rl === 'karyawan' ? 'Karyawan' : 'Admin') + ' berhasil ditambahkan ke Database!');
+      rKT();
       
-      // PENTING: Untuk sementara biarkan UI me-refresh lokal agar tabel tidak kosong,
-      // Nanti fungsi rKT() (Render Karyawan Table) juga harus diubah untuk membaca dari Supabase
+      showToast((rl === 'karyawan' ? 'Karyawan' : 'Admin') + ' berhasil ditambahkan ke Database Supabase!');
   }
 }
+// -------------------------------------------------------------
+
 function rKT(){
   const tb=document.getElementById('ktb');if(!tb)return;tb.innerHTML='';
   DB.users.forEach(u=>{const pct=Math.round((u.sisaCuti/u.totalCuti)*100);const tr=document.createElement('tr');
@@ -1548,14 +1576,10 @@ function simpanProfil(){
   box.innerHTML=changed?`<div class="al al-s">✓ Perubahan berhasil disimpan!</div>`:`<div class="al al-i">Tidak ada perubahan.</div>`;
   if(changed){saveToSheets('updateUser',{id:cu.id,email:cu.email});showToast('Profil diperbarui.');}
 }
-</script> <!-- 1. INI ADALAH PENUTUP SCRIPT LOGIKA LOKAL ANDA -->
+</script> <!-- PENUTUP SCRIPT LOGIKA LOKAL -->
 
-<!-- 2. HAPUS SCRIPT INISIALISASI SUPABASE DI SINI, KARENA SUDAH ADA DI APP.JS -->
-
-<!-- 3. LANGSUNG PANGGIL APP.JS -->
-<!-- Pastikan letak file app.js sudah benar. Jika app.js ada di dalam folder js, ubah menjadi src="js/app.js" -->
+<!-- PEMANGGILAN LOGIKA SUPABASE -->
 <script src="../assets/js/app.js"></script>
 
-<!-- 4. TUTUP HALAMAN HTML DENGAN BENAR -->
 </body>
 </html>
