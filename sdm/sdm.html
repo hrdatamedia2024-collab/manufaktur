@@ -272,6 +272,7 @@ tr:hover td{background:#fafafa}
     <div id="view-absensi" class="hid"></div>
     <div id="view-report" class="hid"></div>
     <div id="view-karyawan" class="hid"></div>
+    <div id="view-kantor" class="hid"></div>
     <div id="view-akun" class="hid"></div>
     <div id="view-pengajuan" class="hid"></div>
     <div id="view-history" class="hid"></div>
@@ -329,6 +330,27 @@ tr:hover td{background:#fafafa}
   </div>
 </div>
 
+<!-- EDIT ABSENSI MASSAL MODAL -->
+<div id="modal-bulkeditabs" class="modal-overlay hid">
+  <div class="modal-box">
+    <div style="font-size:15px;font-weight:700;margin-bottom:12px">✏️ Edit Data Absensi Massal</div>
+    <div id="be-info" style="font-size:13px;color:var(--text2);margin-bottom:12px;padding:8px 12px;background:#fafafa;border-radius:6px"></div>
+    <div class="g2">
+      <div class="fg"><label>Status Kehadiran</label><select id="be-st"></select></div>
+      <div class="fg">
+        <label><input type="checkbox" id="be-ket-chg" style="width:auto;margin-right:6px"> Ubah Keterangan</label>
+        <input id="be-ket" placeholder="Keterangan baru untuk semua data terpilih">
+      </div>
+      <div class="fg"><label>Jam Masuk (kosongkan jika tidak diubah)</label><input type="time" id="be-masuk"></div>
+      <div class="fg"><label>Jam Keluar (kosongkan jika tidak diubah)</label><input type="time" id="be-keluar"></div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-p" onclick="simpanBulkEditAbs()">Terapkan ke Semua Data Terpilih</button>
+      <button class="btn" onclick="closeBulkEditAbs()">Batal</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ============================================================
    CONFIG — MODE LOKAL (TANPA GOOGLE SHEETS)
@@ -366,6 +388,7 @@ const LOCAL_DB_KEY = 'cutigo_db_v1';
    ============================================================ */
 const TABLE_USERS = 'users';
 const TABLE_ABSENSI = 'absensi';
+const TABLE_KANTOR = 'kantor';
 
 function isSupabaseReady(){ return typeof supabaseClient !== 'undefined' && !!supabaseClient; }
 
@@ -433,6 +456,31 @@ async function deleteAbsensiSupabase(a){
   return supaTry(supabaseClient.from(TABLE_ABSENSI).delete().eq('nama_karyawan', a.empName).eq('tanggal', a.tgl), 'hapus absensi');
 }
 
+function kantorToRow(k){
+  return {
+    nama_kantor: k.nama,
+    alamat: k.alamat || '',
+    latitude: k.lat,
+    longitude: k.lng,
+    radius_meter: k.radius
+  };
+}
+// Upsert berdasarkan nama_kantor. Buat unique constraint pada kolom ini
+// di tabel `kantor` Supabase Anda supaya upsert bekerja optimal.
+async function syncKantorSupabase(k){
+  const row = kantorToRow(k);
+  const r = await supaTry(
+    supabaseClient.from(TABLE_KANTOR).upsert([row], {onConflict:'nama_kantor'}).select(),
+    'simpan kantor'
+  );
+  if(r.data && r.data[0]) k.supaId = r.data[0].id;
+  return r;
+}
+async function deleteKantorSupabase(k){
+  if(k.supaId){ return supaTry(supabaseClient.from(TABLE_KANTOR).delete().eq('id', k.supaId), 'hapus kantor'); }
+  return supaTry(supabaseClient.from(TABLE_KANTOR).delete().eq('nama_kantor', k.nama), 'hapus kantor');
+}
+
 // Ambil data terbaru dari Supabase saat aplikasi dibuka (jika terhubung & online).
 // PENTING: ini MENGGABUNGKAN (merge) data Supabase ke data lokal berdasarkan
 // username — BUKAN menimpa semuanya. Ini sengaja, supaya kalau kolom tertentu
@@ -440,9 +488,10 @@ async function deleteAbsensiSupabase(a){
 // yang sudah bisa login secara lokal tidak ikut rusak / terkunci.
 async function initSupabaseData(){
   if(!isSupabaseReady()) return;
-  const [uRes, aRes] = await Promise.all([
+  const [uRes, aRes, kRes] = await Promise.all([
     supaTry(supabaseClient.from(TABLE_USERS).select('*'), 'ambil data karyawan'),
-    supaTry(supabaseClient.from(TABLE_ABSENSI).select('*'), 'ambil data absensi')
+    supaTry(supabaseClient.from(TABLE_ABSENSI).select('*'), 'ambil data absensi'),
+    supaTry(supabaseClient.from(TABLE_KANTOR).select('*'), 'ambil data kantor')
   ]);
   if(uRes.data && uRes.data.length){
     uRes.data.forEach(r=>{
@@ -477,6 +526,14 @@ async function initSupabaseData(){
       else{ DB.absensi.push({ id: DB.nextAbsId++, ...mapped }); }
     });
   }
+  if(kRes.data && kRes.data.length){
+    kRes.data.forEach(r=>{
+      let existing = DB.kantor.find(k=>k.supaId===r.id) || DB.kantor.find(k=>k.nama===r.nama_kantor);
+      const mapped = { supaId:r.id, nama:r.nama_kantor, alamat:r.alamat||'', lat:r.latitude, lng:r.longitude, radius:r.radius_meter||150 };
+      if(existing){ Object.assign(existing, mapped); }
+      else{ DB.kantor.push({ id: DB.nextKId++, ...mapped }); }
+    });
+  }
   saveLocalDB();
   console.log('[Supabase] Data karyawan & absensi tersinkron dari database.');
 }
@@ -503,6 +560,28 @@ function statusChip(kode){
 
 function statusLabel(kode){
   return STATUS_ABS[kode]?STATUS_ABS[kode].label:kode;
+}
+
+/* ============================================================
+   GEOFENCE ABSENSI — LOKASI KANTOR
+   ============================================================ */
+// Jarak antara 2 koordinat (meter) memakai rumus Haversine
+function haversineMeters(lat1,lon1,lat2,lon2){
+  const R=6371000;
+  const toRad=d=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1),dLon=toRad(lon2-lon1);
+  const a=Math.sin(dLat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+// Cari kantor terdekat dari sebuah titik koordinat
+function kantorTerdekat(lat,lng){
+  if(!DB.kantor||!DB.kantor.length)return null;
+  let best=null;
+  DB.kantor.forEach(k=>{
+    const jarak=haversineMeters(lat,lng,k.lat,k.lng);
+    if(!best||jarak<best.jarak)best={kantor:k,jarak};
+  });
+  return best;
 }
 
 /* ============================================================
@@ -544,7 +623,12 @@ const DB={
     {id:19,empId:4,empName:'Citra Dewi',tgl:'2026-05-19',status:'hm',jamMasuk:'',jamKeluar:'',ket:'Cuti melahirkan'},
     {id:20,empId:5,empName:'Doni Pratama',tgl:'2026-05-19',status:'h',jamMasuk:'08:00',jamKeluar:'17:00',ket:''},
   ],
-  clockLogs:[], // {id,empId,empName,tgl,jamIn,jamOut,ket,durasi}
+  clockLogs:[], // {id,empId,empName,tgl,jamIn,jamOut,ket,durasi,lat,lng,akurasi,kantorNama,jarak}
+  kantor:[
+    {id:1,nama:'Kantor Pusat',alamat:'',lat:-7.5361,lng:110.7228,radius:150},
+    {id:2,nama:'Gudang / Pabrik',alamat:'',lat:-7.5410,lng:110.7300,radius:150},
+  ], // {id,nama,alamat,lat,lng,radius(meter)}
+  nextKId:3,
   history:[
     {id:1,tipe:'disetujui',empName:'Budi Santoso',adminName:'Admin HR',tgl:'2026-04-29 09:00',catatan:'',tglCuti:'05–07 Mei 2026',hari:3},
     {id:2,tipe:'disetujui',empName:'Citra Dewi',adminName:'Admin HR',tgl:'2026-05-02 10:00',catatan:'',tglCuti:'12–14 Mei 2026',hari:3},
@@ -785,7 +869,7 @@ document.getElementById('lk-tgl').addEventListener('keydown',e=>{if(e.key==='Ent
 function buildNav(){
   const nav=document.getElementById('mnav');nav.innerHTML='';
   const items=cu.role==='admin'
-    ?[['dashboard','Dashboard'],['kalender','Kalender Cuti'],['absensi','Data Absensi'],['report','Report Absensi'],['karyawan','Data Karyawan'],['akun','Manajemen Akun'],['pengajuan','Pengajuan'],['history','Riwayat Approval'],['profil','Profil']]
+    ?[['dashboard','Dashboard'],['kalender','Kalender Cuti'],['absensi','Data Absensi'],['report','Report Absensi'],['karyawan','Data Karyawan'],['kantor','Lokasi Kantor'],['akun','Manajemen Akun'],['pengajuan','Pengajuan'],['history','Riwayat Approval'],['profil','Profil']]
     :[['clockin','Clock In/Out'],['saldo','Saldo Cuti'],['kalender','Kalender Cuti'],['absensi','Absensi Saya'],['pengajuan','Ajukan Cuti'],['riwayat','Riwayat Saya'],['notif','Notifikasi'],['profil','Profil']];
   items.forEach(([v,l])=>{
     const b=document.createElement('button');b.className='nav-btn';b.id='nav-'+v;
@@ -798,14 +882,14 @@ function buildNav(){
 }
 
 async function showView(v){
-  ['dashboard','clockin','kalender','absensi','report','karyawan','akun','pengajuan','history','riwayat','saldo','notif','profil'].forEach(x=>{
+  ['dashboard','clockin','kalender','absensi','report','karyawan','kantor','akun','pengajuan','history','riwayat','saldo','notif','profil'].forEach(x=>{
     document.getElementById('view-'+x)?.classList.add('hid');
     document.getElementById('nav-'+x)?.classList.remove('on');
   });
   document.getElementById('view-'+v)?.classList.remove('hid');
   document.getElementById('nav-'+v)?.classList.add('on');
 
-  const R={dashboard:rDash,clockin:rClockin,kalender:rKalender,absensi:rAbsensi,report:rReport,karyawan:rKar,akun:rAkun,pengajuan:rPeng,history:rHistory,riwayat:rRiw,saldo:rSaldo,notif:rNotif,profil:rProfil};
+  const R={dashboard:rDash,clockin:rClockin,kalender:rKalender,absensi:rAbsensi,report:rReport,karyawan:rKar,kantor:rKantor,akun:rAkun,pengajuan:rPeng,history:rHistory,riwayat:rRiw,saldo:rSaldo,notif:rNotif,profil:rProfil};
   if(R[v])R[v]();
 }
 
@@ -836,7 +920,7 @@ function rClockin(){
   </div>
   <div class="card">
     <div class="card-title">Riwayat Clock In/Out — Bulan Ini</div>
-    <table><thead><tr><th style="width:15%">Tanggal</th><th style="width:18%">Clock In</th><th style="width:18%">Clock Out</th><th style="width:14%">Durasi</th><th style="width:35%">Keterangan</th></tr></thead>
+    <table><thead><tr><th style="width:13%">Tanggal</th><th style="width:14%">Clock In</th><th style="width:14%">Clock Out</th><th style="width:11%">Durasi</th><th style="width:20%">Lokasi</th><th style="width:28%">Keterangan</th></tr></thead>
     <tbody id="clock-history-table"></tbody></table>
   </div>`;
 
@@ -887,62 +971,127 @@ function getDurasi(jamIn,jamOut){
   }catch{return '-';}
 }
 
+let clockGeo=null;      // {lat,lng,akurasi} hasil deteksi GPS terakhir
+let clockMatch=null;    // {kantor,jarak} kantor terdekat dari posisi user, atau null jika belum ada kantor diatur
+
 function openClockModal(type){
-  clockAction=type;const now=new Date();
-  const timeNow=now.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
-  const log=getTodayLog();
+  clockAction=type;clockGeo=null;clockMatch=null;
   document.getElementById('modal-clock-title').textContent=type==='in'?'Konfirmasi Clock In':'Konfirmasi Clock Out';
   document.getElementById('clock-ket').value='';
   const btn=document.getElementById('clock-confirm-btn');
+  btn.className=type==='in'?'btn btn-g':'btn btn-r';
+  btn.textContent=type==='in'?'✓ Clock In Sekarang':'✓ Clock Out Sekarang';
+  btn.disabled=true;
+  document.getElementById('modal-clock-body').innerHTML=`
+    <div style="text-align:center;padding:18px 14px">
+      <div class="spinner" style="margin:0 auto 10px"></div>
+      <div style="font-size:13px;color:var(--text2)">📍 Mendeteksi lokasi Anda, mohon tunggu...</div>
+    </div>`;
+  document.getElementById('modal-clock').classList.remove('hid');
+  requestClockLocation(type);
+}
 
-  if(type==='in'){
-    btn.className='btn btn-g';btn.textContent='✓ Clock In Sekarang';
-    document.getElementById('modal-clock-body').innerHTML=`
-      <div style="text-align:center;padding:14px;background:#f0fdf4;border-radius:8px;margin-bottom:14px">
+function requestClockLocation(type){
+  if(!('geolocation' in navigator)){
+    document.getElementById('modal-clock-body').innerHTML=`<div class="la-error">Perangkat/browser Anda tidak mendukung deteksi lokasi (GPS). Clock In/Out tidak dapat dilakukan.</div>`;
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos=>{
+      clockGeo={lat:pos.coords.latitude,lng:pos.coords.longitude,akurasi:Math.round(pos.coords.accuracy||0)};
+      renderClockLocationStatus(type);
+    },
+    err=>{
+      let msg='Gagal mendapatkan lokasi.';
+      if(err.code===1)msg='Izin lokasi ditolak. Aktifkan izin lokasi (GPS) di browser untuk melakukan Clock In/Out.';
+      else if(err.code===2)msg='Lokasi tidak tersedia. Pastikan GPS perangkat Anda aktif.';
+      else if(err.code===3)msg='Waktu deteksi lokasi habis. Coba lagi.';
+      document.getElementById('modal-clock-body').innerHTML=`<div class="la-error">📍 ${msg}</div>
+        <button class="btn btn-sm" style="margin-top:8px" onclick="requestClockLocation('${type}')">🔄 Coba Lagi</button>`;
+    },
+    {enableHighAccuracy:true,timeout:15000,maximumAge:0}
+  );
+}
+
+function renderClockLocationStatus(type){
+  const now=new Date();
+  const timeNow=now.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
+  const btn=document.getElementById('clock-confirm-btn');
+  const body=document.getElementById('modal-clock-body');
+  const log=getTodayLog();
+  const timeCard=type==='in'
+    ?`<div style="text-align:center;padding:14px;background:#f0fdf4;border-radius:8px;margin-bottom:10px">
         <div style="font-size:28px;font-weight:700;color:#057a55">${timeNow}</div>
         <div style="font-size:12px;color:#6b7280;margin-top:4px">${now.toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long'})}</div>
-      </div>`;
-  } else {
-    btn.className='btn btn-r';btn.textContent='✓ Clock Out Sekarang';
-    const dur=log?getDurasi(log.jamIn,timeNow):'-';
-    document.getElementById('modal-clock-body').innerHTML=`
-      <div style="text-align:center;padding:14px;background:#fef2f2;border-radius:8px;margin-bottom:14px">
+      </div>`
+    :`<div style="text-align:center;padding:14px;background:#fef2f2;border-radius:8px;margin-bottom:10px">
         <div style="font-size:28px;font-weight:700;color:#e02424">${timeNow}</div>
-        <div style="font-size:12px;color:#6b7280;margin-top:4px">Clock In tadi: ${log?log.jamIn:'-'} &bull; Durasi: ${dur}</div>
+        <div style="font-size:12px;color:#6b7280;margin-top:4px">Clock In tadi: ${log?log.jamIn:'-'} &bull; Durasi: ${log?getDurasi(log.jamIn,timeNow):'-'}</div>
       </div>`;
+
+  if(!DB.kantor||!DB.kantor.length){
+    clockMatch=null;
+    body.innerHTML=timeCard+`<div class="al al-i" style="margin:0">⚠️ Lokasi kantor belum diatur oleh Admin HR. Clock In/Out untuk sementara tidak dibatasi lokasi.</div>`;
+    btn.disabled=false;
+    return;
   }
-  document.getElementById('modal-clock').classList.remove('hid');
+
+  const match=kantorTerdekat(clockGeo.lat,clockGeo.lng);
+  clockMatch=match;
+  const inside=match.jarak<=match.kantor.radius;
+  const jarakTxt=match.jarak<1000?`${Math.round(match.jarak)} m`:`${(match.jarak/1000).toFixed(2)} km`;
+  if(inside){
+    body.innerHTML=timeCard+`
+      <div style="padding:10px 12px;background:#def7ec;border-radius:6px;font-size:12px;color:#057a55">
+        ✅ Anda berada di area <strong>${match.kantor.nama}</strong> (± ${jarakTxt} dari titik pusat, akurasi GPS ${clockGeo.akurasi} m). Clock ${type==='in'?'In':'Out'} bisa dilakukan.
+      </div>`;
+    btn.disabled=false;
+  } else {
+    body.innerHTML=timeCard+`
+      <div style="padding:10px 12px;background:#fde8e8;border-radius:6px;font-size:12px;color:#c81e1e">
+        ❌ Anda berada <strong>${jarakTxt}</strong> dari kantor terdekat (<strong>${match.kantor.nama}</strong>, radius ${match.kantor.radius} m). Clock ${type==='in'?'In':'Out'} hanya bisa dilakukan dalam radius kantor.
+      </div>
+      <button class="btn btn-sm" style="margin-top:8px" onclick="requestClockLocation('${type}')">🔄 Deteksi Ulang Lokasi</button>`;
+    btn.disabled=true;
+  }
 }
 
 async function confirmClock(){
+  if(!clockGeo){showToast('Lokasi belum terdeteksi. Coba lagi.',false);return;}
+  if(DB.kantor&&DB.kantor.length&&clockMatch&&clockMatch.jarak>clockMatch.kantor.radius){
+    showToast('Anda berada di luar area kantor. Clock In/Out ditolak.',false);return;
+  }
   const now=new Date();
   const timeNow=now.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
   const today=ymd(now);
   const ket=document.getElementById('clock-ket').value.trim();
   let log=getTodayLog();
+  const geoMeta={lat:clockGeo.lat,lng:clockGeo.lng,akurasi:clockGeo.akurasi,
+    kantorNama:clockMatch?clockMatch.kantor.nama:'',jarak:clockMatch?Math.round(clockMatch.jarak):null};
 
   if(clockAction==='in'){
     if(!log){
-      log={id:DB.nextClockId++,empId:cu.id,empName:cu.name,tgl:today,jamIn:timeNow,jamOut:'',ket,durasi:''};
+      log={id:DB.nextClockId++,empId:cu.id,empName:cu.name,tgl:today,jamIn:timeNow,jamOut:'',ket,durasi:'',...geoMeta};
       DB.clockLogs.push(log);
-    }
+    } else { Object.assign(log,geoMeta); }
     // Juga update absensi
     const existAbs=DB.absensi.find(a=>a.empId===cu.id&&a.tgl===today);
     if(!existAbs){
       DB.absensi.push({id:DB.nextAbsId++,empId:cu.id,empName:cu.name,tgl:today,status:'h',jamMasuk:timeNow,jamKeluar:'',ket});
     } else { existAbs.jamMasuk=timeNow; }
     // Simpan ke penyimpanan lokal
-    await saveToSheets('clockIn',{empId:cu.id,empName:cu.name,tgl:today,jamIn:timeNow,ket});
-    showToast(`Clock In berhasil — ${timeNow}`);
+    await saveToSheets('clockIn',{empId:cu.id,empName:cu.name,tgl:today,jamIn:timeNow,ket,...geoMeta});
+    showToast(`Clock In berhasil — ${timeNow}${clockMatch?' di '+clockMatch.kantor.nama:''}`);
   } else {
     if(log){
-      log.jamOut=timeNow;log.durasi=getDurasi(log.jamIn,timeNow);log.ket=ket||log.ket;
+      log.jamOut=timeNow;log.durasi=getDurasi(log.jamIn,timeNow);log.ket=ket||log.ket;Object.assign(log,geoMeta);
       const absRow=DB.absensi.find(a=>a.empId===cu.id&&a.tgl===today);
       if(absRow)absRow.jamKeluar=timeNow;
-      await saveToSheets('clockOut',{empId:cu.id,tgl:today,jamOut:timeNow,ket});
+      await saveToSheets('clockOut',{empId:cu.id,tgl:today,jamOut:timeNow,ket,...geoMeta});
       showToast(`Clock Out berhasil — ${timeNow} (Durasi: ${log.durasi})`);
     }
   }
+  saveLocalDB();
   document.getElementById('modal-clock').classList.add('hid');
   renderClockHistory();
   updateClock();
@@ -953,16 +1102,17 @@ function renderClockHistory(){
   const today=ymd(new Date());
   const bulan=today.substring(0,7);
   const myLogs=[...DB.clockLogs.filter(l=>l.empId===cu.id&&l.tgl.startsWith(bulan))].sort((a,b)=>b.tgl.localeCompare(a.tgl));
-  if(!myLogs.length){tb.innerHTML=`<tr><td colspan="5" style="text-align:center;color:var(--text2);padding:20px">Belum ada data clock in/out bulan ini</td></tr>`;return;}
+  if(!myLogs.length){tb.innerHTML=`<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">Belum ada data clock in/out bulan ini</td></tr>`;return;}
   tb.innerHTML='';
   myLogs.forEach(l=>{
     const isToday=l.tgl===today;
     const tr=document.createElement('tr');
     if(isToday)tr.style.background='#f0fdf4';
+    const lokasi=l.kantorNama?`📍 ${l.kantorNama}<div style="font-size:10px;color:var(--text2)">± ${l.jarak}m dari titik</div>`:'-';
     tr.innerHTML=`<td><strong${isToday?' style="color:#057a55"':''} >${fd(l.tgl)}${isToday?' <span style="font-size:10px;color:#057a55">(Hari ini)</span>':''}</strong></td>
     <td style="font-family:monospace;color:#057a55;font-weight:600">${l.jamIn||'-'}</td>
     <td style="font-family:monospace;color:var(--primary);font-weight:600">${l.jamOut||'<span style="color:var(--text2)">Belum out</span>'}</td>
-    <td>${l.durasi||'-'}</td><td style="color:var(--text2)">${l.ket||'-'}</td>`;
+    <td>${l.durasi||'-'}</td><td style="font-size:11px">${lokasi}</td><td style="color:var(--text2)">${l.ket||'-'}</td>`;
     tb.appendChild(tr);
   });
 }
@@ -1108,7 +1258,12 @@ function rAbsensi(){
         ${Object.entries(STATUS_ABS).map(([k,v])=>`<span style="margin-right:10px"><span style="background:${v.color};color:${v.text};padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600">${k}</span> = ${v.label}</span>`).join('')}
       </div>
       <div id="abs-summary" style="margin-bottom:12px"></div>
-      <table id="tbl-absensi"><thead><tr><th style="width:18%">Karyawan</th><th style="width:13%">Tanggal</th><th style="width:22%">Status</th><th style="width:11%">Masuk</th><th style="width:11%">Keluar</th><th style="width:17%">Keterangan</th><th style="width:8%">Aksi</th></tr></thead>
+      <div id="abs-bulkbar" style="display:none;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <button class="btn btn-p btn-sm" onclick="openBulkEditAbs()">✏️ Edit Massal (<span id="abs-selcount-e">0</span>)</button>
+        <button class="btn btn-r btn-sm" onclick="hapusAbsMassal()">🗑 Hapus Massal (<span id="abs-selcount-d">0</span>)</button>
+        <button class="btn btn-sm" onclick="selAbsIds.clear();rAbsTable();">Batal Pilih</button>
+      </div>
+      <table id="tbl-absensi"><thead><tr><th style="width:4%"><input type="checkbox" id="abs-selall" onchange="toggleAllAbs(this.checked)"></th><th style="width:16%">Karyawan</th><th style="width:12%">Tanggal</th><th style="width:20%">Status</th><th style="width:10%">Masuk</th><th style="width:10%">Keluar</th><th style="width:16%">Keterangan</th><th style="width:8%">Aksi</th></tr></thead>
       <tbody id="abs-table"></tbody></table>
     </div>`;
     rAbsTable();
@@ -1143,15 +1298,20 @@ async function simpanAbs(){
   await syncAbsensiSupabase(row);
   toggleAddAbs();rAbsTable();showToast('Data absensi disimpan'+(isSupabaseReady()?' & disinkronkan ke Supabase.':' secara lokal.'));
 }
+let selAbsIds=new Set();
 function rAbsTable(){
   const tb=document.getElementById('abs-table');if(!tb)return;
   const tf=document.getElementById('af-tgl')?.value||'',kf=document.getElementById('af-kar')?.value||'';
   let list=[...DB.absensi].sort((a,b)=>b.tgl.localeCompare(a.tgl)||a.empName.localeCompare(b.empName));
   if(tf)list=list.filter(a=>a.tgl===tf);if(kf)list=list.filter(a=>a.empId===parseInt(kf));
   tb.innerHTML='';
-  if(!list.length){tb.innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">Belum ada data</td></tr>`;return;}
+  // Buang id yang terpilih tapi sudah tidak tampil di daftar terfilter (menjaga konsistensi)
+  const visibleIds=new Set(list.map(a=>a.id));
+  [...selAbsIds].forEach(id=>{if(!visibleIds.has(id))selAbsIds.delete(id);});
+  updateAbsBulkBar(list);
+  if(!list.length){tb.innerHTML=`<tr><td colspan="8" style="text-align:center;color:var(--text2);padding:20px">Belum ada data</td></tr>`;return;}
   list.forEach(a=>{const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${a.empName}</td><td>${fd(a.tgl)}</td><td>${statusChip(a.status)}</td><td>${a.jamMasuk||'-'}</td><td>${a.jamKeluar||'-'}</td><td style="color:var(--text2)">${a.ket||'-'}</td><td><button class="btn btn-xs" onclick="editAbs(${a.id})">Edit</button></td>`;
+    tr.innerHTML=`<td><input type="checkbox" ${selAbsIds.has(a.id)?'checked':''} onchange="toggleSelAbs(${a.id},this.checked)"></td><td>${a.empName}</td><td>${fd(a.tgl)}</td><td>${statusChip(a.status)}</td><td>${a.jamMasuk||'-'}</td><td>${a.jamKeluar||'-'}</td><td style="color:var(--text2)">${a.ket||'-'}</td><td><button class="btn btn-xs" onclick="editAbs(${a.id})">Edit</button></td>`;
     tb.appendChild(tr);
   });
   const sumEl=document.getElementById('abs-summary');
@@ -1190,6 +1350,74 @@ async function hapusAbsModal(){
   DB.absensi=DB.absensi.filter(x=>x.id!==editAbsId);
   saveLocalDB();
   closeEditAbs();rAbsTable();showToast('Data absensi dihapus.');
+}
+
+/* ============================================================
+   PILIH & EDIT/HAPUS MASSAL — DATA ABSENSI
+   (Bebas pilih berapa saja baris yang mau diedit/dihapus sekaligus)
+   ============================================================ */
+function toggleAllAbs(checked){
+  const tf=document.getElementById('af-tgl')?.value||'',kf=document.getElementById('af-kar')?.value||'';
+  let list=[...DB.absensi];
+  if(tf)list=list.filter(a=>a.tgl===tf);if(kf)list=list.filter(a=>a.empId===parseInt(kf));
+  selAbsIds.clear();
+  if(checked)list.forEach(a=>selAbsIds.add(a.id));
+  rAbsTable();
+}
+function toggleSelAbs(id,checked){
+  if(checked)selAbsIds.add(id);else selAbsIds.delete(id);
+  rAbsTable();
+}
+function updateAbsBulkBar(list){
+  const bar=document.getElementById('abs-bulkbar');if(!bar)return;
+  bar.style.display=selAbsIds.size?'flex':'none';
+  document.getElementById('abs-selcount-e').textContent=selAbsIds.size;
+  document.getElementById('abs-selcount-d').textContent=selAbsIds.size;
+  const selAll=document.getElementById('abs-selall');
+  if(selAll)selAll.checked=list.length>0&&list.every(a=>selAbsIds.has(a.id));
+}
+async function hapusAbsMassal(){
+  if(!selAbsIds.size)return;
+  if(!confirm(`Hapus ${selAbsIds.size} data absensi terpilih? Tindakan ini tidak bisa dibatalkan.`))return;
+  const rows=DB.absensi.filter(a=>selAbsIds.has(a.id));
+  for(const a of rows){ await deleteAbsensiSupabase(a); }
+  DB.absensi=DB.absensi.filter(a=>!selAbsIds.has(a.id));
+  selAbsIds.clear();
+  saveLocalDB();
+  rAbsTable();
+  showToast(`${rows.length} data absensi telah dihapus.`);
+}
+function openBulkEditAbs(){
+  if(!selAbsIds.size)return;
+  document.getElementById('be-info').textContent=`${selAbsIds.size} data absensi terpilih akan diperbarui. Kosongkan/pilih "Tidak diubah" pada kolom yang tidak ingin diubah.`;
+  document.getElementById('be-st').innerHTML=`<option value="">-- Tidak diubah --</option>`+Object.entries(STATUS_ABS).map(([k,v])=>`<option value="${k}">${v.label} [${k}]</option>`).join('');
+  document.getElementById('be-ket').value='';
+  document.getElementById('be-masuk').value='';
+  document.getElementById('be-keluar').value='';
+  document.getElementById('be-ket-chg').checked=false;
+  document.getElementById('modal-bulkeditabs').classList.remove('hid');
+}
+function closeBulkEditAbs(){document.getElementById('modal-bulkeditabs').classList.add('hid');}
+async function simpanBulkEditAbs(){
+  const st=document.getElementById('be-st').value;
+  const masuk=document.getElementById('be-masuk').value;
+  const keluar=document.getElementById('be-keluar').value;
+  const ubahKet=document.getElementById('be-ket-chg').checked;
+  const ket=document.getElementById('be-ket').value.trim();
+  if(!st&&!masuk&&!keluar&&!ubahKet){showToast('Tidak ada perubahan yang dipilih.',false);return;}
+  const rows=DB.absensi.filter(a=>selAbsIds.has(a.id));
+  for(const a of rows){
+    if(st)a.status=st;
+    if(masuk)a.jamMasuk=masuk;
+    if(keluar)a.jamKeluar=keluar;
+    if(ubahKet)a.ket=ket;
+    await syncAbsensiSupabase(a);
+  }
+  saveLocalDB();
+  const n=rows.length;
+  selAbsIds.clear();
+  closeBulkEditAbs();rAbsTable();
+  showToast(`${n} data absensi berhasil diperbarui`+(isSupabaseReady()?' & disinkronkan ke Supabase.':' secara lokal.'));
 }
 
 /* ============================================================
@@ -1522,6 +1750,141 @@ async function editK(id){
   await updateUserSupabase(u);
   u.initials=ini(u.name);
   rKT();showToast('Data diperbarui'+(isSupabaseReady()?' & disinkronkan ke Supabase.':' & tersimpan lokal.'));
+}
+
+/* ============================================================
+   LOKASI KANTOR (GEOFENCE ABSENSI)
+   ============================================================ */
+let selKantorIds=new Set();
+function rKantor(){
+  const el=document.getElementById('view-kantor');
+  el.innerHTML=`<div class="card">
+    <div class="sec-hdr"><div class="card-title" style="margin:0">📍 Lokasi Kantor (Titik Absen)</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" onclick="document.getElementById('add-kt').classList.toggle('hid')">+ Tambah Kantor</button>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;padding:8px 12px;background:#fafafa;border:1px solid var(--border);border-radius:6px">
+      Karyawan hanya bisa Clock In / Clock Out jika berada dalam radius salah satu titik kantor di bawah ini. Bisa menambahkan 2 atau lebih titik kantor/cabang.
+    </div>
+    <div id="add-kt" class="sub-form hid">
+      <div class="g2">
+        <div class="fg"><label>Nama Kantor / Cabang</label><input id="akt-nama" placeholder="Misal: Kantor Pusat"></div>
+        <div class="fg"><label>Alamat (opsional)</label><input id="akt-alamat" placeholder="Alamat singkat"></div>
+        <div class="fg"><label>Latitude</label><input id="akt-lat" type="number" step="any" placeholder="-7.5361"></div>
+        <div class="fg"><label>Longitude</label><input id="akt-lng" type="number" step="any" placeholder="110.7228"></div>
+        <div class="fg"><label>Radius Jangkauan (meter)</label><input id="akt-radius" type="number" min="10" step="10" value="150"></div>
+        <div class="fg"><label>&nbsp;</label><button class="btn btn-sm" type="button" onclick="pakaiLokasiSaya()">📍 Gunakan Lokasi Saya Sekarang</button></div>
+      </div>
+      <div id="add-kt-al"></div>
+      <div style="display:flex;gap:8px"><button class="btn btn-p" onclick="simpanKantor()">Simpan</button><button class="btn" onclick="batalKantorForm()">Batal</button></div>
+    </div>
+    <div id="kt-bulkbar" style="display:none;gap:8px;margin-bottom:10px">
+      <button class="btn btn-r btn-sm" onclick="hapusKantorMassal()">🗑 Hapus Terpilih (<span id="kt-selcount">0</span>)</button>
+      <button class="btn btn-sm" onclick="selKantorIds.clear();rKantorTable();">Batal Pilih</button>
+    </div>
+    <table><thead><tr><th style="width:4%"><input type="checkbox" id="kt-selall" onchange="toggleAllKantor(this.checked)"></th><th style="width:20%">Nama Kantor</th><th style="width:20%">Alamat</th><th style="width:16%">Koordinat</th><th style="width:14%">Radius</th><th style="width:14%">Aksi</th></tr></thead>
+    <tbody id="kt-table"></tbody></table>
+  </div>`;
+  rKantorTable();
+}
+function batalKantorForm(){
+  document.getElementById('add-kt').classList.add('hid');
+  editKantorId=null;
+  document.getElementById('akt-nama').value='';document.getElementById('akt-alamat').value='';
+  document.getElementById('akt-lat').value='';document.getElementById('akt-lng').value='';document.getElementById('akt-radius').value=150;
+}
+function pakaiLokasiSaya(){
+  if(!('geolocation' in navigator)){showToast('Browser tidak mendukung deteksi lokasi.',false);return;}
+  showToast('Mendeteksi lokasi Anda...');
+  navigator.geolocation.getCurrentPosition(pos=>{
+    document.getElementById('akt-lat').value=pos.coords.latitude.toFixed(6);
+    document.getElementById('akt-lng').value=pos.coords.longitude.toFixed(6);
+    showToast('Koordinat lokasi Anda saat ini berhasil diisi.');
+  },err=>{
+    showToast('Gagal mendapatkan lokasi: izin ditolak atau GPS tidak aktif.',false);
+  },{enableHighAccuracy:true,timeout:15000});
+}
+let editKantorId=null;
+async function simpanKantor(){
+  const nama=document.getElementById('akt-nama').value.trim();
+  const alamat=document.getElementById('akt-alamat').value.trim();
+  const lat=parseFloat(document.getElementById('akt-lat').value);
+  const lng=parseFloat(document.getElementById('akt-lng').value);
+  const radius=parseInt(document.getElementById('akt-radius').value)||150;
+  const al=document.getElementById('add-kt-al');
+  if(!nama){al.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Nama kantor wajib diisi</div>`;return;}
+  if(isNaN(lat)||isNaN(lng)){al.innerHTML=`<div class="al al-e" style="margin-bottom:8px">Latitude & Longitude wajib diisi (angka)</div>`;return;}
+  let k;
+  if(editKantorId){
+    k=DB.kantor.find(x=>x.id===editKantorId);
+    if(k){k.nama=nama;k.alamat=alamat;k.lat=lat;k.lng=lng;k.radius=radius;}
+  } else {
+    k={id:DB.nextKId++,nama,alamat,lat,lng,radius};
+    DB.kantor.push(k);
+  }
+  await syncKantorSupabase(k);
+  saveLocalDB();
+  batalKantorForm();
+  rKantorTable();
+  showToast((editKantorId?'Data kantor diperbarui':'Kantor baru berhasil ditambahkan')+(isSupabaseReady()?' & disinkronkan ke Supabase.':' secara lokal.'));
+}
+function editKantor(id){
+  const k=DB.kantor.find(x=>x.id===id);if(!k)return;
+  editKantorId=id;
+  document.getElementById('add-kt').classList.remove('hid');
+  document.getElementById('akt-nama').value=k.nama;
+  document.getElementById('akt-alamat').value=k.alamat||'';
+  document.getElementById('akt-lat').value=k.lat;
+  document.getElementById('akt-lng').value=k.lng;
+  document.getElementById('akt-radius').value=k.radius;
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+async function hapusKantor(id){
+  const k=DB.kantor.find(x=>x.id===id);if(!k)return;
+  if(!confirm(`Hapus titik kantor "${k.nama}"? Tindakan ini tidak bisa dibatalkan.`))return;
+  await deleteKantorSupabase(k);
+  DB.kantor=DB.kantor.filter(x=>x.id!==id);
+  selKantorIds.delete(id);
+  saveLocalDB();rKantorTable();
+  showToast(`Kantor "${k.nama}" telah dihapus.`);
+}
+function toggleAllKantor(checked){
+  selKantorIds.clear();
+  if(checked)DB.kantor.forEach(k=>selKantorIds.add(k.id));
+  rKantorTable();
+}
+function toggleSelKantor(id,checked){
+  if(checked)selKantorIds.add(id);else selKantorIds.delete(id);
+  rKantorTable();
+}
+async function hapusKantorMassal(){
+  if(!selKantorIds.size)return;
+  if(!confirm(`Hapus ${selKantorIds.size} titik kantor terpilih? Tindakan ini tidak bisa dibatalkan.`))return;
+  const rows=DB.kantor.filter(k=>selKantorIds.has(k.id));
+  for(const k of rows){ await deleteKantorSupabase(k); }
+  DB.kantor=DB.kantor.filter(k=>!selKantorIds.has(k.id));
+  selKantorIds.clear();
+  saveLocalDB();rKantorTable();
+  showToast(`${rows.length} titik kantor telah dihapus.`);
+}
+function rKantorTable(){
+  const tb=document.getElementById('kt-table');if(!tb)return;
+  const bar=document.getElementById('kt-bulkbar');
+  if(bar){bar.style.display=selKantorIds.size?'flex':'none';document.getElementById('kt-selcount').textContent=selKantorIds.size;}
+  const selAll=document.getElementById('kt-selall');if(selAll)selAll.checked=DB.kantor.length>0&&selKantorIds.size===DB.kantor.length;
+  tb.innerHTML='';
+  if(!DB.kantor.length){tb.innerHTML=`<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">Belum ada titik kantor. Tambahkan minimal 1 titik supaya Clock In/Out bisa dipakai.</td></tr>`;return;}
+  DB.kantor.forEach(k=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><input type="checkbox" ${selKantorIds.has(k.id)?'checked':''} onchange="toggleSelKantor(${k.id},this.checked)"></td>
+    <td style="font-weight:600">${k.nama}</td>
+    <td style="color:var(--text2);font-size:12px">${k.alamat||'-'}</td>
+    <td style="font-family:monospace;font-size:11px">${k.lat.toFixed(5)}, ${k.lng.toFixed(5)}</td>
+    <td>${k.radius} m</td>
+    <td><button class="btn btn-xs" style="margin-bottom:3px" onclick="editKantor(${k.id})">Edit</button><br><button class="btn btn-xs btn-r" onclick="hapusKantor(${k.id})">Hapus</button></td>`;
+    tb.appendChild(tr);
+  });
 }
 
 /* ============================================================
